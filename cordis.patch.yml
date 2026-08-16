@@ -1,0 +1,9 @@
+# dsh-subscription-auth bundle patch
+#
+# This file is the `dsh.bundle.patch` layer of the package: when the plugin is
+# installed into a profile bundle stack (e.g. `dsh plugin --profile <name> add
+# dsh-subscription-auth`), the profile boot merges this single `insert` of the
+# plugin's host row, exactly like a manual cordis.patch.yml mount line.
+- insert:
+    - id: dsh-subscription-auth
+      name: 'dsh-subscription-auth'

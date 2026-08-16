@@ -1,0 +1,10 @@
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,2 +1,6 @@
+ 	const { requestedMode: mode, effectiveMode, justification, subject } = request;
++	if ((mode === "read-only" || ESCALATION_TARGETS.includes(mode)) && (effectiveMode === "read-only" || ESCALATION_TARGETS.includes(effectiveMode)) && (mode === effectiveMode || (WIDER_MODES[mode] ?? []).includes(effectiveMode))) {
++		// A globally advertised schema can redundantly request a no-op mode.
++		return effectiveMode;
++	}
+ 	if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode)) throw new Error(`sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`);

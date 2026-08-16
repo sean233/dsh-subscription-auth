@@ -1,0 +1,24 @@
+# Sanitized dsh-subscription-auth example.
+# Replace only the endpoint/executable values appropriate for your deployment.
+# Do not put tokens or account identifiers in settings.
+
+subscription-auth-chatgpt:
+  apiBaseURL: https://chatgpt.com/backend-api/codex/responses
+  redirectPort: 1455
+  maxTokens: 8192
+
+subscription-auth-claude:
+  apiBaseURL: https://api.anthropic.com/v1/messages
+  redirectPort: 54545
+  maxTokens: 64000
+
+subscription-auth-grok:
+  apiBaseURL: https://api.x.ai/v1/responses
+  maxTokens: 8192
+
+subscription-auth-kimi:
+  apiBaseURL: https://api.kimi.com/coding/v1/messages
+  maxTokens: 32768
+
+subscription-auth-agy:
+  executable: agy

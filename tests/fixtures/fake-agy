@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+
+const args = process.argv.slice(2)
+
+if (args[0] === 'models') {
+  process.stdout.write([
+    'model\tname\tcontext',
+    'agy-runtime-gemini-model\tAgy runtime Gemini model\t1048576',
+    'agy-owned-secondary\tAgy-owned secondary model\t200000',
+    'agy-owned-tertiary\tAgy-owned tertiary model\t131072',
+    'agy-runtime-gemini-model\tDuplicate\t1',
+  ].join('\n') + '\n')
+  process.exit(0)
+}
+
+const modelIndex = args.indexOf('--model')
+const model = modelIndex >= 0 ? args[modelIndex + 1] : ''
+const promptIndex = args.indexOf('-p')
+const prompt = promptIndex >= 0 ? args[promptIndex + 1] ?? '' : ''
+
+if (model === 'abort-model') {
+  setInterval(() => {}, 1000)
+} else if (model === 'exit-model') {
+  process.exit(7)
+} else {
+  const structuredOutput = prompt.includes('FAKE_TOOL_CALL')
+    ? {
+        type: 'tool_calls',
+        tool_calls: [{ name: 'get_weather', arguments: { city: 'Beijing' } }],
+      }
+    : { type: 'text', text: 'OK', tool_calls: [] }
+
+  // This preliminary event must never become a DSH text delta.
+  process.stdout.write(JSON.stringify({ type: 'agent_response', delta: 'PRELIMINARY_DELTA' }) + '\n')
+  process.stdout.write(JSON.stringify({
+    type: 'result',
+    result: {
+      structured_output: structuredOutput,
+      usage: { input_tokens: 42, output_tokens: 9, cached_tokens: 2, thinking_tokens: 3 },
+    },
+  }) + '\n')
+}

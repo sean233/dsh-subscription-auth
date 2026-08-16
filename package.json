@@ -1,0 +1,50 @@
+{
+  "name": "dsh-subscription-auth",
+  "version": "0.4.0",
+  "description": "订阅会员 OAuth 登录（ChatGPT / Claude / Grok / Kimi / Agy CLI）：配置中心「订阅服务」页登录/注销，自动发现订阅模型列表，按登录状态注册五个原生提供商，支持思考强度选择",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./client": { "types": "./lib/types/client.d.ts", "default": "./lib/client.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "patches", "scripts", "cordis.patch.yml", "dsh.plugin.json", "README.md", "README.en.md", "LICENSE", "NOTICE.md", "CONTRIBUTING.md", "SECURITY.md", "docs", "examples"],
+  "license": "BSD-3-Clause",
+  "engines": { "dsh": ">=0.0.1" },
+  "dshx": {
+    "contributes": { "tools": [], "skills": [] }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "bun scripts/build-bun.mjs",
+    "test:clean": "bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs",
+    "test:privacy": "bun scripts/privacy-scan.mjs",
+    "test:source": "bun tests/smoke.mjs && bun tests/provider-error.mjs && bun tests/logging-privacy.mjs && bun tests/security-regressions.mjs && bun tests/agy.mjs",
+    "test:lib": "bun tests/lib-check.mjs && node tests/apply-wiring.mjs && node tests/reasoning-wire.mjs",
+    "test": "bun run build && bun run test:clean && bun run test:privacy",
+    "test:all": "bun run test && bun run test:source && bun run test:lib",
+    "ci": "bun run test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.0.1",
+    "@deepseek-ai/dsh-credentials": "^0.0.1",
+    "@deepseek-ai/dsh-settings": "^0.0.1"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build generated lib
+        run: bun run build
+      - name: Run clean-checkout-safe tests
+        run: bun run test:clean
+      - name: Run privacy scanner
+        run: bun run test:privacy
