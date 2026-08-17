@@ -2,6 +2,12 @@
 
 `dsh-subscription-auth` adds subscription sign-in and model access to dsh. Users do not enter API keys; tokens are held by dsh's credential service, and available models are discovered after a provider is authenticated.
 
+## Origin and acknowledgements
+
+This is an independent GitHub repository and is not part of GitHub's fork network. The project began by building on the public implementation and ideas in [Khellendros97/dsh-subscription-auth](https://github.com/Khellendros97/dsh-subscription-auth). We thank Khellendros97 for exploring subscription-provider integration for dsh and for releasing that work under BSD-3-Clause.
+
+The current version substantially expands the channel abstraction, error handling, authentication gating, Agy CLI bridge, sandbox compatibility, tests, documentation, and privacy boundaries. It is nevertheless a derived work rather than a clean-room rewrite. The original copyright notice and license terms remain preserved in [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+
 ## Native channels
 
 The plugin currently registers exactly five native channels:

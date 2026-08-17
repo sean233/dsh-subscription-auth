@@ -2,6 +2,12 @@
 
 `dsh-subscription-auth` 为 dsh 增加订阅会员登录和模型接入。插件不要求用户填写 API key；令牌由 dsh 的凭据服务保管，模型列表在登录后按提供商能力自动发现。
 
+## 项目来源与致谢
+
+本仓库是一个独立的 GitHub 仓库，不属于 GitHub 的 fork network。项目最初基于 [Khellendros97/dsh-subscription-auth](https://github.com/Khellendros97/dsh-subscription-auth) 的公开实现和思路继续开发；感谢原作者 Khellendros97 对 dsh 订阅渠道接入的探索和 BSD-3-Clause 开源授权。
+
+当前版本已经对渠道抽象、错误处理、登录门控、Agy CLI bridge、沙箱兼容、测试、文档和隐私边界做了较大扩展，但仍属于衍生作品，而不是 clean-room 完全重写。原项目的版权声明和许可证条件继续保留在 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md) 中。
+
 ## 原生渠道
 
 插件当前注册且实现的原生渠道只有五个：
