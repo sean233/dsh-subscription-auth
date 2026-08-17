@@ -48,15 +48,41 @@ non-destructive models command manually. Agy output must contain a valid TSV
 model listing for discovery and a final `result.structured_output` event for a
 generation.
 
+The stdout limit is a rolling tail, not a prefix: long preliminary agent/tool
+output is discarded so the newest final event remains available to the parser.
+The final event itself still needs to fit within the existing limit. Capture
+writes are coalesced into fixed-size segments, so many tiny stdout events do not
+create one retained object per event. When DSH tools are present, the
+`--json-schema` argument is built from the request's actual tool names and
+argument schemas, including required properties; requests without tools retain
+the text-only envelope behavior. Root/no-`$id` argument schemas are cloned as
+private generated `$id` resources, so local refs such as `#/$defs/...`,
+`#/definitions/...`, and `#`, plus named/dynamic anchors, remain isolated per
+embedded tool. Generated resource IDs are allocated after scanning all tool
+schemas, including nested `$id` declarations; absolute and relative identifiers
+are canonicalized deterministically. Duplicate canonical resources or duplicate
+tool names fail the adapter before the CLI starts rather than producing an
+ambiguous schema. A schema with an explicit `$id` retains that resource and its
+local-ref semantics unchanged. The returned structured output is checked again
+against the exact request tools and argument schemas before DSH tool-call chunks
+are emitted, and one response is bounded to 128 returned tool calls. Defensive
+normalization unwraps only a JSON-encoded nested
+`type:"text"` envelope; a nested `type:"tool_calls"` JSON value remains
+ordinary text unless it is present in the validated outer tool-call array.
+
 Agy has no built-in model fallback in this plugin. If `agy models` returns no
 valid rows and no explicit or persisted model list is configured, the Agy
 provider can be authenticated but has no selectable model until discovery
 succeeds.
 
 The plugin intentionally hides stderr and does not return intermediate agent
-deltas. `shell: false`, the output limit, the JSON schema, and child-local
-abort behavior are security boundaries; do not bypass them with a shell or a
-process-group kill.
+deltas. Its backend prompt only suppresses an accidental identical retry within
+the current unresolved DSH tool-loop step when the previous call's result is
+already present. Repeating a call remains valid on a later user turn, after an
+intervening state-changing call, for polling/refresh/retry, or when the user
+asks. `shell: false`, the rolling output limit, the request-derived JSON
+schema, and child-local abort behavior are security boundaries; do not bypass
+them with a shell or a process-group kill.
 
 ## Provider errors
 
