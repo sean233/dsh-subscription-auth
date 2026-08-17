@@ -204,7 +204,9 @@ function allocateAgyEmbeddedResourceIds(
 ): Array<string | undefined> {
   validateAgyToolDefinitions(tools)
 
-  const usedResourceIds = new Set<string>()
+  // The aggregate schema owns the embedded namespace base. Reserve it so a
+  // caller cannot declare a tool resource with the same identifier.
+  const usedResourceIds = new Set<string>([AGY_EMBEDDED_SCHEMA_BASE])
   for (const tool of tools) {
     if (hasAgyRootResourceId(tool.parameters)) {
       addAgyResourceIds(
@@ -273,6 +275,8 @@ function cloneAgySchemaForEmbedding(
  * Agy's schema applies to the final structured result, so tool-call items are
  * represented as an allowlisted `anyOf`: each branch fixes the tool name and
  * references an isolated copy of that tool's complete DSH argument schema.
+ * The aggregate schema uses the same embedded namespace base as generated
+ * resources, so relative root IDs keep their allocated URI semantics.
  * Root/no-`$id` schemas are cloned as private generated `$id` resources, so
  * their local JSON-Pointer refs, named anchors, and dynamic anchors remain
  * local to that tool. Schemas with an explicit `$id` retain that resource
@@ -289,6 +293,7 @@ export function buildAgyOutputSchema(
     const embeddedResourceIds = allocateAgyEmbeddedResourceIds(tools)
 
     return {
+      $id: AGY_EMBEDDED_SCHEMA_BASE,
       type: 'object',
       additionalProperties: false,
       required: ['type', 'tool_calls'],
@@ -762,16 +767,24 @@ function parseAgySchemaDialectUri(value: string): AgySchemaDialect | undefined {
  * Pick the standards validator for the complete emitted request schema.
  *
  * Explicit `$schema` URIs are classified by their complete standard URI, not
- * by a substring search. Draft-07 tuple `items`, 2019-09 recursive keywords,
- * and 2020-12 dynamic/prefix keywords remain supported when a schema omits an
- * explicit dialect marker. A request with incompatible explicit dialects is
- * rejected rather than silently validating it with the wrong vocabulary.
+ * by a substring search. Draft-07/2019-09 tuple `items`, 2019-09 recursive
+ * keywords, shared 2019-09/2020-12 unevaluated/dependent keywords, and
+ * 2020-12 dynamic/prefix keywords remain supported when a schema omits an
+ * explicit dialect marker. A request with incompatible explicit or inferred
+ * dialect markers is rejected rather than silently validating it with the
+ * wrong vocabulary.
  */
 function detectAgySchemaDialect(schema: unknown): AgySchemaDialect {
   const explicitDialects = new Set<AgySchemaDialect>()
-  let hasDraft7Marker = false
-  let hasDraft2019Marker = false
-  let hasModernMarker = false
+  const inferredDialects = new Set<AgySchemaDialect>(['draft-07', 'draft-2019-09', '2020-12'])
+  let hasInferredMarkers = false
+
+  const requireAgySchemaDialects = (supported: readonly AgySchemaDialect[]): void => {
+    hasInferredMarkers = true
+    for (const dialect of inferredDialects) {
+      if (!supported.includes(dialect)) inferredDialects.delete(dialect)
+    }
+  }
 
   const visit = (entry: unknown): void => {
     if (!isRecord(entry)) return
@@ -783,25 +796,40 @@ function detectAgySchemaDialect(schema: unknown): AgySchemaDialect {
       explicitDialects.add(dialect)
     }
     if (Array.isArray(entry.items) || hasOwnAgySchemaProperty(entry, 'additionalItems')) {
-      hasDraft7Marker = true
+      requireAgySchemaDialects(['draft-07', 'draft-2019-09'])
     }
     if (['$recursiveRef', '$recursiveAnchor'].some((key) => hasOwnAgySchemaProperty(entry, key))) {
-      hasDraft2019Marker = true
+      requireAgySchemaDialects(['draft-2019-09'])
     }
-    if (['prefixItems', 'unevaluatedItems', 'unevaluatedProperties', '$dynamicRef', '$dynamicAnchor']
+    if (['prefixItems', '$dynamicRef', '$dynamicAnchor']
       .some((key) => hasOwnAgySchemaProperty(entry, key))) {
-      hasModernMarker = true
+      requireAgySchemaDialects(['2020-12'])
+    }
+    if (['unevaluatedItems', 'unevaluatedProperties', 'dependentRequired', 'dependentSchemas', 'minContains', 'maxContains']
+      .some((key) => hasOwnAgySchemaProperty(entry, key))) {
+      requireAgySchemaDialects(['draft-2019-09', '2020-12'])
     }
     visitAgySchemaChildren(entry, visit)
   }
 
   visit(schema)
-  if (explicitDialects.size > 1) {
+  if (explicitDialects.size > 1 || (hasInferredMarkers && inferredDialects.size === 0)) {
     throw new AgySchemaBuildError('Agy request contains incompatible JSON Schema dialects')
   }
   const explicitDialect = explicitDialects.values().next().value as AgySchemaDialect | undefined
-  return explicitDialect
-    ?? (hasModernMarker ? '2020-12' : hasDraft2019Marker ? 'draft-2019-09' : hasDraft7Marker ? 'draft-07' : '2020-12')
+  if (explicitDialect !== undefined && hasInferredMarkers && !inferredDialects.has(explicitDialect)) {
+    throw new AgySchemaBuildError('Agy request contains incompatible JSON Schema dialects')
+  }
+  // Preserve the historical default for keywords shared by 2019-09 and
+  // 2020-12, while an explicit marker selects the compatible validator.
+  const inferredDialect = !hasInferredMarkers
+    ? undefined
+    : inferredDialects.has('2020-12')
+      ? '2020-12'
+      : inferredDialects.has('draft-2019-09')
+        ? 'draft-2019-09'
+        : 'draft-07'
+  return explicitDialect ?? inferredDialect ?? '2020-12'
 }
 
 /**

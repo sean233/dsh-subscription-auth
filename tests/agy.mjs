@@ -323,6 +323,30 @@ const relativeSchemaTools = [{
   },
 }]
 
+const relativeRootResourceSchemaTools = [
+  {
+    name: 'relative_shared_root',
+    description: 'Own a relative root resource',
+    parameters: {
+      $id: 'shared.json',
+      type: 'object',
+      properties: { value: { type: 'string', const: 'shared-root-value' } },
+      required: ['value'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'relative_shared_consumer',
+    description: 'Reference a relative root resource',
+    parameters: {
+      type: 'object',
+      properties: { shared: { $ref: 'shared.json' } },
+      required: ['shared'],
+      additionalProperties: false,
+    },
+  },
+]
+
 const containsWithoutMaxSchemaTools = [{
   name: 'contains_without_max',
   description: 'Require at least one matching array item',
@@ -450,6 +474,24 @@ const draft7TupleSchemaTools = [{
   },
 }]
 
+const draft2019TupleSchemaTools = [{
+  name: 'draft2019_tuple',
+  description: 'Exercise draft 2019-09 tuple items',
+  parameters: {
+    $schema: 'https://json-schema.org/draft/2019-09/schema',
+    type: 'object',
+    properties: {
+      values: {
+        type: 'array',
+        items: [{ type: 'string' }, { type: 'integer' }],
+        additionalItems: false,
+      },
+    },
+    required: ['values'],
+    additionalProperties: false,
+  },
+}]
+
 const draft2019RecursiveSchemaTools = [{
   name: 'draft2019_recursive',
   description: 'Exercise draft 2019-09 recursive references',
@@ -466,6 +508,66 @@ const draft2019RecursiveSchemaTools = [{
     additionalProperties: false,
   },
 }]
+
+const incompatibleDraft7ModernSchemaTools = [
+  {
+    name: 'explicit_draft7',
+    description: 'Use an explicit draft-07 schema',
+    parameters: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'inferred_modern',
+    description: 'Use a 2020-12-only keyword without a marker',
+    parameters: {
+      type: 'object',
+      properties: {
+        values: {
+          type: 'array',
+          prefixItems: [{ type: 'string' }],
+          unevaluatedItems: false,
+        },
+      },
+      required: ['values'],
+      additionalProperties: false,
+    },
+  },
+]
+
+const incompatibleModernDraft7SchemaTools = [
+  {
+    name: 'explicit_modern',
+    description: 'Use an explicit 2020-12 schema',
+    parameters: {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'inferred_draft7',
+    description: 'Use draft-07 tuple items without a marker',
+    parameters: {
+      type: 'object',
+      properties: {
+        values: {
+          type: 'array',
+          items: [{ type: 'string' }],
+          additionalItems: false,
+        },
+      },
+      required: ['values'],
+      additionalProperties: false,
+    },
+  },
+]
 
 const annotationDataSchemaTools = [{
   name: 'annotation_data',
@@ -621,6 +723,40 @@ for (const [label, agyAdapterModule] of [
     `${label} emitted aggregate schema rejects invalid cross-tool resource data`,
   )
 
+  const relativeRootSnapshots = structuredClone(relativeRootResourceSchemaTools.map((tool) => tool.parameters))
+  const relativeRootSchema = agyAdapterModule.buildAgyOutputSchema(relativeRootResourceSchemaTools)
+  const relativeRootVariants = relativeRootSchema.properties.tool_calls.items.anyOf
+  const relativeRootArguments = relativeRootVariants.map((variant) => resolveToolArguments(relativeRootSchema, variant))
+  assert.equal(
+    relativeRootSchema.$id,
+    'https://dsh.invalid/agy/tool/',
+    `${label} emits the base used to resolve relative embedded resources`,
+  )
+  assert.equal(relativeRootArguments[0].$id, 'shared.json', `${label} preserves the relative root resource ID`)
+  assert.equal(relativeRootArguments[1].$id, 'https://dsh.invalid/agy/tool/1', `${label} isolates the generated consumer resource`)
+  assert.equal(relativeRootArguments[1].properties.shared.$ref, 'shared.json', `${label} preserves the relative cross-resource ref`)
+  assert.equal(
+    validateJsonSchema(relativeRootSchema, {
+      type: 'tool_calls',
+      tool_calls: [{ name: 'relative_shared_consumer', arguments: { shared: { value: 'shared-root-value' } } }],
+    }),
+    true,
+    `${label} compiles and accepts a relative root resource referenced by a generated tool`,
+  )
+  assert.equal(
+    validateJsonSchema(relativeRootSchema, {
+      type: 'tool_calls',
+      tool_calls: [{ name: 'relative_shared_consumer', arguments: { shared: { value: 'wrong-value' } } }],
+    }),
+    false,
+    `${label} rejects invalid data through a relative root resource reference`,
+  )
+  assert.deepEqual(
+    relativeRootResourceSchemaTools.map((tool) => tool.parameters),
+    relativeRootSnapshots,
+    `${label} does not mutate relative root resource schemas`,
+  )
+
   const anchorSnapshots = structuredClone(anchorSchemaTools.map((tool) => tool.parameters))
   const anchorSchema = agyAdapterModule.buildAgyOutputSchema(anchorSchemaTools)
   const anchorVariants = anchorSchema.properties.tool_calls.items.anyOf
@@ -729,6 +865,10 @@ for (const [label, agyAdapterModule] of [
     [crossResourceSchemaTools, { type: 'tool_calls', tool_calls: [{ name: 'use_shared', arguments: { shared: { value: 'shared-value' } } }] }],
     [anchorSchemaTools, { type: 'tool_calls', tool_calls: [{ name: 'anchor_two', arguments: { value: 'two' } }] }],
     [relativeSchemaTools, { type: 'tool_calls', tool_calls: [{ name: 'relative_ref', arguments: { value: 'relative-value' } }] }],
+    [relativeRootResourceSchemaTools, {
+      type: 'tool_calls',
+      tool_calls: [{ name: 'relative_shared_consumer', arguments: { shared: { value: 'shared-root-value' } } }],
+    }],
   ]
   for (const [runtimeTools, output] of validOutputs) {
     assert.deepEqual(
@@ -737,6 +877,17 @@ for (const [label, agyAdapterModule] of [
       `${label} runtime validation preserves JSON Schema refs, IDs, anchors, and relative resources`,
     )
   }
+  assert.throws(
+    () => agyAdapterModule.validateAgyStructuredOutput(
+      {
+        type: 'tool_calls',
+        tool_calls: [{ name: 'relative_shared_consumer', arguments: { shared: { value: 'wrong-value' } } }],
+      },
+      relativeRootResourceSchemaTools,
+    ),
+    (error) => error?.kind === 'output' && /requested tool schema/i.test(error.message),
+    `${label} runtime rejects invalid relative root resource data`,
+  )
   const containsValidOutput = {
     type: 'tool_calls',
     tool_calls: [{ name: 'contains_without_max', arguments: { values: [0, 2, 3] } }],
@@ -953,6 +1104,36 @@ for (const [label, agyAdapterModule] of [
     `${label} runtime rejects invalid draft-07 tuple output`,
   )
 
+  const draft2019TupleValidOutput = {
+    type: 'tool_calls',
+    tool_calls: [{ name: 'draft2019_tuple', arguments: { values: ['prefix', 2] } }],
+  }
+  const draft2019TupleInvalidOutput = {
+    type: 'tool_calls',
+    tool_calls: [{ name: 'draft2019_tuple', arguments: { values: ['prefix', 2, 3] } }],
+  }
+  const draft2019TupleOutputSchema = agyAdapterModule.buildAgyOutputSchema(draft2019TupleSchemaTools)
+  assert.equal(
+    validateDraft2019JsonSchema(draft2019TupleOutputSchema, draft2019TupleValidOutput),
+    true,
+    `${label} draft-2019-09 Ajv oracle accepts tuple output`,
+  )
+  assert.equal(
+    validateDraft2019JsonSchema(draft2019TupleOutputSchema, draft2019TupleInvalidOutput),
+    false,
+    `${label} draft-2019-09 Ajv oracle rejects tuple output with additional items`,
+  )
+  assert.deepEqual(
+    agyAdapterModule.validateAgyStructuredOutput(draft2019TupleValidOutput, draft2019TupleSchemaTools),
+    draft2019TupleValidOutput,
+    `${label} runtime accepts explicit draft-2019-09 tuple output`,
+  )
+  assert.throws(
+    () => agyAdapterModule.validateAgyStructuredOutput(draft2019TupleInvalidOutput, draft2019TupleSchemaTools),
+    (error) => error?.kind === 'output' && /requested tool schema/i.test(error.message),
+    `${label} runtime rejects invalid explicit draft-2019-09 tuple output`,
+  )
+
   const draft2019ValidOutput = {
     type: 'tool_calls',
     tool_calls: [{ name: 'draft2019_recursive', arguments: { value: 'root', children: [{ value: 'child' }] } }],
@@ -983,6 +1164,33 @@ for (const [label, agyAdapterModule] of [
     `${label} runtime rejects invalid explicit draft-2019-09 output`,
   )
 }
+
+const incompatibleDialectCases = [
+  [
+    'explicit draft-07 with inferred 2020-12 markers',
+    incompatibleDraft7ModernSchemaTools,
+    { type: 'tool_calls', tool_calls: [{ name: 'inferred_modern', arguments: { values: ['prefix', 1] } }] },
+  ],
+  [
+    'explicit 2020-12 with inferred draft-07 markers',
+    incompatibleModernDraft7SchemaTools,
+    { type: 'tool_calls', tool_calls: [{ name: 'inferred_draft7', arguments: { values: ['prefix', 1] } }] },
+  ],
+]
+for (const [label, agyAdapterModule] of [
+  ['source', sourceAgyAdapter],
+  ['generated', generatedAgyAdapter],
+]) {
+  for (const [caseName, runtimeTools, output] of incompatibleDialectCases) {
+    assert.throws(
+      () => agyAdapterModule.validateAgyStructuredOutput(output, runtimeTools),
+      (error) => error?.kind === 'output' && error.message === 'Agy CLI returned output that does not match the requested tool schema',
+      `${label} rejects ${caseName} without leaking schema details`,
+    )
+  }
+}
+console.log('✓ Agy source/generated validation rejects explicit/inferred JSON Schema dialect conflicts safely')
+
 console.log('✓ Agy source/generated runtime validation matches Ajv for draft-07, draft-2019-09, draft-2020-12, and encoded-pointer semantics')
 
 console.log('✓ Agy source/generated output schemas preserve text/no-tools behavior and enforce dynamic tool names/arguments')
