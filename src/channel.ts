@@ -98,6 +98,8 @@ export interface ChannelContext {
   clearToken(): Promise<void>
   /** 登录成功后由驱动触发模型发现。 */
   afterLogin(): void
+  /** 令牌因永久失败被清除后由驱动触发 provider 撤销（架构一致的注册更新）。 */
+  notifyTokenCleared?(): void
 }
 
 export interface ChannelRuntime {

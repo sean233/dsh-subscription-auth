@@ -4,7 +4,7 @@
  * @module dsh-subscription-auth/channels/chatgpt
  */
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { ChatGptAdapter } from '../adapter.js'
+import { ChatGptAdapter, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from '../adapter.js'
 import type { AdapterModel } from '../adapter.js'
 import {
   buildAuthorizeUrl,
@@ -17,6 +17,7 @@ import {
 import { fetchCodexModels } from '../discovery.js'
 import { formatProviderErrorForLog } from '../provider-error.js'
 import type { ChannelContext, ChannelDefinition, ChannelReasoning, ChannelRuntime } from '../channel.js'
+import { TokenCoordinator } from '../token-coordinator.js'
 
 const DEFAULT_MODELS: AdapterModel[] = [
   { id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 400_000 },
@@ -54,6 +55,16 @@ export const chatgptChannel: ChannelDefinition = {
     let controller: AbortController | undefined
     let pending: { url: string } | undefined
 
+    const coordinator = new TokenCoordinator({
+      displayName: 'ChatGPT (订阅)',
+      preemptMs: 60_000,
+      readToken: () => ctx.readToken(),
+      writeToken: (t) => ctx.writeToken(t),
+      clearToken: () => ctx.clearToken(),
+      refresh: (ref) => refreshAccessToken(ref),
+      onCleared: () => ctx.notifyTokenCleared?.(),
+    })
+
     const adapter = new ChatGptAdapter({
       options: () => ({
         apiBaseURL: ctx.options().apiBaseURL,
@@ -62,20 +73,13 @@ export const chatgptChannel: ChannelDefinition = {
         defaultContextWindow: ctx.options().defaultContextWindow,
       }),
       reasoning: REASONING,
-      resolveAccessToken: async () => {
-        const token = await ctx.readToken()
-        if (!token) {
-          throw new LlmError('chatgpt: 未登录。请在 设置 → 订阅服务 里完成订阅账号授权。', 'MISSING_CREDENTIAL')
-        }
-        if (token.expires - Date.now() < 60_000) {
-          const refreshed = await refreshAccessToken(token.refresh)
-          await ctx.writeToken(refreshed)
-          return { access: refreshed.access }
-        }
+      resolveAccessToken: async (force?: boolean, rejectedAccessToken?: string) => {
+        const token = await coordinator.getToken(force ?? false, rejectedAccessToken)
         return { access: token.access }
       },
       label: 'chatgpt',
       displayName: 'ChatGPT (订阅)',
+      streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     })
 
     return {
@@ -96,7 +100,7 @@ export const chatgptChannel: ChannelDefinition = {
           .then(async (code) => {
             ctx.log('收到授权回调，开始换取令牌…')
             const token = await exchangeCode(code, port, verifier)
-            await ctx.writeToken(token)
+            await coordinator.replaceToken(token)
             ctx.log('登录成功，开始发现模型列表…')
             ctx.afterLogin()
           })
@@ -111,19 +115,35 @@ export const chatgptChannel: ChannelDefinition = {
       },
 
       async authStatus() {
-        const token = await ctx.readToken()
-        if (token) {
-          return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
-        }
         if (pending && controller && !controller.signal.aborted) {
           return { provider: ctx.id, status: 'pending', url: pending.url }
         }
-        return { provider: ctx.id, status: 'not-logged-in' }
+        const token = await ctx.readToken()
+        if (!token) {
+          return { provider: ctx.id, status: 'not-logged-in' }
+        }
+        if (token.expires - Date.now() > 60_000) {
+          return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
+        }
+        // Proactive refresh for expired/near-expiry token
+        try {
+          const fresh = await coordinator.getToken(false)
+          return { provider: ctx.id, status: 'logged-in', account: fresh.accountId, expiresAt: fresh.expires }
+        } catch (error) {
+          if (error instanceof LlmError && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) {
+            return { provider: ctx.id, status: 'not-logged-in' }
+          }
+          // Transient failure but still unexpired -> remain logged-in with old token
+          if (token.expires > Date.now()) {
+            return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
+          }
+          return { provider: ctx.id, status: 'not-logged-in' }
+        }
       },
 
       async logout() {
         this.cancelLogin()
-        await ctx.clearToken()
+        await coordinator.logout()
       },
 
       cancelLogin() {
@@ -133,16 +153,33 @@ export const chatgptChannel: ChannelDefinition = {
       },
 
       async discoverModels() {
-        const token = await ctx.readToken()
-        if (!token || token.expires - Date.now() < 60_000) return []
+        let token: { access: string; accountId?: string; expires: number } | undefined
         try {
-          return await fetchCodexModels(
+          token = await coordinator.getToken(false)
+        } catch (error) {
+          if (error instanceof LlmError && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) {
+            return []
+          }
+          // Transient refresh failure: fall back to stored token if still valid
+          const stored = await ctx.readToken()
+          if (!stored || stored.expires <= Date.now()) return []
+          token = stored
+        }
+        if (!token) return []
+        const previous = ctx.getConfig().discoveredModels
+        try {
+          const models = await fetchCodexModels(
             token.access,
             token.accountId,
             ctx.options().apiBaseURL.replace(/\/codex\/responses$/, ''),
           )
+          if (models.length > 0) return models
+          // Empty result is treated as failure -> preserve previous
+          if (previous !== undefined && previous.length > 0) return previous
+          return []
         } catch (error) {
           ctx.log(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+          if (previous !== undefined && previous.length > 0) return previous
           return []
         }
       },

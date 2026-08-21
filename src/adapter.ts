@@ -24,6 +24,58 @@ import type {
 import type { ChannelReasoning } from './channel.js'
 import { llmErrorFromHttp, llmErrorFromSse, readErrorBody, sanitizeDiagnosticError } from './provider-error.js'
 
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+
+export const MAX_STREAM_IDLE_TIMEOUT_MS = 0x7fffffff
+
+export function assertValidIdleTimeout(timeoutMs: number): void {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_STREAM_IDLE_TIMEOUT_MS) {
+    throw new RangeError(`streamIdleTimeoutMs must be a finite positive number <= ${MAX_STREAM_IDLE_TIMEOUT_MS}, got ${String(timeoutMs)}`)
+  }
+}
+
+export interface IdleWatchdog {
+  readonly signal: AbortSignal
+  pulse(): void
+  stop(): void
+  timedOut(): boolean
+}
+
+export function createIdleWatchdog(caller: AbortSignal | undefined, timeoutMs: number): IdleWatchdog {
+  assertValidIdleTimeout(timeoutMs)
+  const controller = new AbortController()
+  let expired = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const arm = (): void => {
+    if (timer !== undefined) clearTimeout(timer)
+    timer = setTimeout(() => {
+      expired = true
+      controller.abort(new Error(`stream idle timeout after ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+    timer.unref?.()
+  }
+  const onCallerAbort = (): void => controller.abort(caller?.reason)
+  if (caller?.aborted === true) controller.abort(caller.reason)
+  else caller?.addEventListener('abort', onCallerAbort, { once: true })
+  arm()
+  return {
+    signal: controller.signal,
+    pulse: arm,
+    stop() {
+      if (timer !== undefined) clearTimeout(timer)
+      caller?.removeEventListener('abort', onCallerAbort)
+    },
+    timedOut: () => expired,
+  }
+}
+
+function mapFetchFailure(label: string, error: unknown, watchdog: IdleWatchdog, caller: AbortSignal | undefined): LlmError {
+  if (watchdog.timedOut()) return new LlmError(`${label} stream idle timeout`, 'TIMEOUT', { cause: sanitizeDiagnosticError(error, `${label} stream idle timeout`) })
+  if (caller?.aborted === true) return new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: sanitizeDiagnosticError(error, `${label} request aborted by caller`) })
+  if (error instanceof LlmError) return error
+  return new LlmError(`${label} request failed`, 'TRANSPORT', { cause: sanitizeDiagnosticError(error, `${label} request failed`) })
+}
+
 export interface AdapterModel {
   id: string
   name: string
@@ -40,13 +92,15 @@ export interface AdapterOptions {
 export interface AdapterConfig {
   /** 每次请求前读取最新配置（适配器不缓存配置快照）。 */
   options(): AdapterOptions
-  /** 每次请求前解析（必要时刷新）出可用的 access token。 */
-  resolveAccessToken(): Promise<{ access: string }>
+  /** 每次请求前解析（必要时刷新）出可用的 access token。 force=true 时强制刷新；rejectedAccessToken 为被 401 拒绝的 access（用于去重）。 */
+  resolveAccessToken(forceRefresh?: boolean, rejectedAccessToken?: string): Promise<{ access: string }>
   /** 思考强度档位（缺省不提供）。effort id 原样作为 reasoning.effort 发送。 */
   reasoning?: ChannelReasoning
   /** 错误信息与 providerInfo 里的标签（默认 'chatgpt' / 'ChatGPT (订阅)'）。 */
   label?: string
   displayName?: string
+  /** Stream idle watchdog timeout ms (default 300s). */
+  streamIdleTimeoutMs?: number
 }
 
 function flattenText(blocks: ContentBlock[]): string {
@@ -177,7 +231,7 @@ function mapStatus(status: string | undefined): { kind: string; failure?: any } 
  * response.output_item.added（记录 function_call 的 call_id/name）、
  * response.reasoning_*_text.delta、response.completed、response.failed、error。
  */
-async function* translate(body: ReadableStream<Uint8Array>): AsyncIterable<StreamChunk> {
+async function* translate(body: ReadableStream<Uint8Array>, watchdog?: IdleWatchdog): AsyncIterable<StreamChunk> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -302,7 +356,9 @@ async function* translate(body: ReadableStream<Uint8Array>): AsyncIterable<Strea
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    buffer += decoder.decode(value, { stream: true })
+    if (watchdog) watchdog.pulse()
+    if (value && value.byteLength > 0) buffer += decoder.decode(value, { stream: true })
+    else continue
     let idx: number
     while ((idx = buffer.indexOf('\n')) >= 0) {
       let line = buffer.slice(0, idx)
@@ -416,45 +472,103 @@ export class ChatGptAdapter extends LlmAdapter {
     })
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  private async doFetch(
+    options: GenerateOptions,
+    access: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
     const o = this.cfg.options()
-    const label = this.cfg.label ?? 'chatgpt'
-    const token = await this.cfg.resolveAccessToken()
     const body = serializeRequest(options, o, this.cfg.reasoning)
     const headers: Record<string, string> = {
-      authorization: `Bearer ${token.access}`,
+      authorization: `Bearer ${access}`,
       'content-type': 'application/json',
       accept: 'text/event-stream',
       ...attributionHeaders(),
     }
+    return fetch(o.apiBaseURL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    })
+  }
 
-    let response: Response
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const label = this.cfg.label ?? 'chatgpt'
+    const timeoutMs = this.cfg.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
+    assertValidIdleTimeout(timeoutMs)
+    // Resolve credential without idle timer; timer covers provider fetch/body only.
+    let token = await this.cfg.resolveAccessToken()
+    let watchdog = createIdleWatchdog(options.signal, timeoutMs)
     try {
-      response = await fetch(o.apiBaseURL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: options.signal,
-      })
-    } catch (error) {
-      if (options.signal?.aborted) {
-        throw new LlmError(`${label} request aborted by caller`, 'ABORTED', {
-          cause: sanitizeDiagnosticError(error, `${label} request aborted by caller`),
-        })
+      let response: Response
+      try {
+        response = await this.doFetch(options, token.access, watchdog.signal)
+      } catch (error) {
+        throw mapFetchFailure(label, error, watchdog, options.signal)
       }
-      throw new LlmError(`${label} request failed`, 'TRANSPORT', {
-        cause: sanitizeDiagnosticError(error, `${label} request failed`),
-      })
+      if (response.status === 401) {
+        // Cancel or drain first body before retry to avoid leaking connection.
+        try { await response.body?.cancel() } catch { /* ignore */ }
+        // Do not let idle timer run during credential refresh; preserve caller cancellation.
+        watchdog.stop()
+        const rejectedAccess = token.access
+        const refreshPromise = this.cfg.resolveAccessToken(true, rejectedAccess)
+        // Safely drain losing promise to avoid unhandled rejection.
+        const drain = (p: Promise<unknown>): void => { p.catch(() => {}) }
+        if (options.signal?.aborted) {
+          drain(refreshPromise)
+          throw new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: sanitizeDiagnosticError(options.signal.reason ?? new DOMException('Aborted', 'AbortError'), `${label} request aborted by caller`) })
+        }
+        if (options.signal) {
+          let onAbort: (() => void) | undefined
+          const abortPromise = new Promise<never>((_, reject) => {
+            onAbort = () => reject(options.signal!.reason ?? new DOMException('Aborted', 'AbortError'))
+            options.signal!.addEventListener('abort', onAbort, { once: true })
+          })
+          try {
+            token = await Promise.race([refreshPromise, abortPromise])
+          } catch (error) {
+            if (options.signal.aborted) {
+              drain(refreshPromise)
+              throw new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: sanitizeDiagnosticError(error, `${label} request aborted by caller`) })
+            }
+            throw error instanceof LlmError ? error : new LlmError(`${label} token refresh failed`, 'AUTH', { cause: sanitizeDiagnosticError(error, `${label} token refresh failed`) })
+          } finally {
+            if (onAbort !== undefined) options.signal.removeEventListener('abort', onAbort)
+          }
+        } else {
+          try {
+            token = await refreshPromise
+          } catch (error) {
+            throw error instanceof LlmError ? error : new LlmError(`${label} token refresh failed`, 'AUTH', { cause: sanitizeDiagnosticError(error, `${label} token refresh failed`) })
+          }
+        }
+        if (options.signal?.aborted) {
+          throw new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: sanitizeDiagnosticError(new DOMException('Aborted', 'AbortError'), `${label} request aborted by caller`) })
+        }
+        watchdog = createIdleWatchdog(options.signal, timeoutMs)
+        try {
+          response = await this.doFetch(options, token.access, watchdog.signal)
+        } catch (error) {
+          throw mapFetchFailure(label, error, watchdog, options.signal)
+        }
+      }
+      if (!response.ok) {
+        const body = await readErrorBody(response)
+        const failed = llmErrorFromHttp(label, response.status, body)
+        throw new LlmError(failed.message, failed.code, { status: response.status })
+      }
+      if (!response.body) {
+        throw new LlmError(`${label} API returned no response body`, 'EMPTY_RESPONSE')
+      }
+      try {
+        yield* translate(response.body, watchdog)
+      } catch (error) {
+        throw mapFetchFailure(label, error, watchdog, options.signal)
+      }
+    } finally {
+      watchdog.stop()
     }
-
-    if (!response.ok) {
-      const body = await readErrorBody(response)
-      const failed = llmErrorFromHttp(label, response.status, body)
-      throw new LlmError(failed.message, failed.code, { status: response.status })
-    }
-    if (!response.body) {
-      throw new LlmError(`${label} API returned no response body`, 'EMPTY_RESPONSE')
-    }
-    yield* translate(response.body)
   }
 }

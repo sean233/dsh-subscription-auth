@@ -31,6 +31,30 @@ that ID and name are still owned and executed by Agy and are surfaced unchanged.
 - `executable`: Agy-only executable name or path. It is passed as a single
   executable to `spawn`; it is never evaluated by a shell.
 
+## Subscription channel lifecycle (ChatGPT/Grok)
+
+- Tokens are refreshed proactively when less than 60s of life remains, with
+  per-channel single-flight coalescing so a rotating refresh token is spent at
+  most once. A concurrent refresh re-reads the stored token before hitting the
+  network, and `forceRefresh` is used after a 401.
+- Permanent refresh rejections (`invalid_grant`, `refresh_token_expired`,
+  `refresh_token_reused`, `refresh_token_invalidated`) clear the stored
+  credential and surface `INVALID_CREDENTIAL` requiring re-login. Transient
+  failures fall back to the current access token only while it is still
+  unexpired; an expired token is never returned.
+- Auth status is refresh-aware: an expired credential is not reported as
+  logged-in, and model discovery preserves the last known list when a
+  transient refresh or discovery call fails.
+
+## Streaming
+
+- The shared Responses adapter (ChatGPT/Grok) retries exactly once with
+  force-refresh on the first HTTP 401, then surfaces the second failure. Only
+  401 triggers a retry.
+- An idle-read watchdog aborts the stream when no data arrives within the
+  timeout. The default timeout is 300s and is injectable per adapter via
+  `streamIdleTimeoutMs` for tests and compatibility.
+
 ## Model precedence
 
 At runtime the plugin uses:

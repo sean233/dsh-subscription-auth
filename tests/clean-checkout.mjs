@@ -13,6 +13,8 @@ const requiredFiles = [
   '.editorconfig', '.gitignore', '.github/workflows/ci.yml',
   'docs/CONFIGURATION.md', 'docs/TROUBLESHOOTING.md', 'docs/SECURITY-PRIVACY.md',
   'examples/config.example.yaml', 'scripts/privacy-scan.mjs', 'lib/types/index.d.ts',
+  'scripts/patch-dsh-opencode-go-muse.mjs', 'scripts/manage-dsh-runtime.mjs',
+  'tests/patch-dsh-opencode-go-muse.mjs', 'tests/manage-dsh-runtime.mjs',
 ]
 for (const path of requiredFiles) assert.equal(existsSync(join(root, path)), true, `required file: ${path}`)
 
@@ -92,7 +94,7 @@ for (const source of collectSourceTs(sourceRoot)) {
 }
 
 assert.equal(packageJson.scripts?.build, 'bun scripts/build-bun.mjs')
-assert.equal(packageJson.scripts?.['test:clean'], 'bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs')
+assert.equal(packageJson.scripts?.['test:clean'], 'bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs && node tests/patch-dsh-opencode-go-muse.mjs && node tests/manage-dsh-runtime.mjs')
 assert.match(readFileSync(join(root, 'LICENSE'), 'utf8'), /Copyright \(c\) 2026, Khellendros97/)
 assert.match(readFileSync(join(root, 'NOTICE.md'), 'utf8'), /https:\/\//)
 

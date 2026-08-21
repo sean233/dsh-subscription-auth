@@ -92,6 +92,26 @@ that a provider envelope bypassed the shared normalizer. Kimi messages saying
 that a model supports only a smaller context are classified as
 `CONTEXT_WINDOW_EXCEEDED`, even if the HTTP status is 401.
 
+## OpenCode Go catalog overlay (muse-spark-1.2-contributor)
+
+`muse-spark-1.2-contributor` under `opencode-go` is an official OpenCode Go model catalog overlay (`@earendil-works/pi-ai/dist/providers/data/opencode-go.json`), not a subscription-auth native channel. The patch script injects it into an isolated dsh runtime outside `_npx` caches.
+
+Install and verify with the exact pinned version and the default stable runtime:
+
+```sh
+node scripts/manage-dsh-runtime.mjs install --dsh-version 0.1.0-rc.8
+node scripts/manage-dsh-runtime.mjs check --dsh-version 0.1.0-rc.8
+# direct catalog check
+node scripts/patch-dsh-opencode-go-muse.mjs --node-modules-root ~/.local/share/dsh-subscription-auth/dsh-runtime/node_modules --check --json
+node scripts/patch-dsh-opencode-go-muse.mjs --node-modules-root ~/.local/share/dsh-subscription-auth/dsh-runtime/node_modules --apply --backup-dir ~/.dsh/backups/dsh-model-catalog --json
+```
+
+- Default runtime: `~/.local/share/dsh-subscription-auth/dsh-runtime`; stable entry printed by the script is `<runtime>/node_modules/@deepseek-ai/dsh/lib/bin.js` — use that path for launchd.
+- Backups are written outside `node_modules` under `~/.dsh/backups/dsh-model-catalog` and verified by exact original readback.
+- The helper is fail-closed: any conflicting entry (wrong group, mismatched `id`/metadata, or package identity mismatch) aborts with an error instead of overwriting. Symlinked targets or package paths are rejected.
+- Upgrades require rerunning `install --dsh-version <exact-version>` with a strict `x.y.z` or `x.y.z-prerelease` version (no `latest`, ranges, or shell metacharacters). Copy the newly printed `entry` into launchd.
+- Do not edit `_npx` or `node_modules` catalog files directly, and do not force a single provider-level `protocol` in `settings.yaml` for `opencode-go`; the catalog mixes protocols and a single-protocol override is not durable.
+
 ## The rc.6 helper refuses to patch
 
 The helper is fail-closed by design:

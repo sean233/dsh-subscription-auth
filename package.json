@@ -27,9 +27,9 @@
   },
   "scripts": {
     "build": "bun scripts/build-bun.mjs",
-    "test:clean": "bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs",
+    "test:clean": "bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs && node tests/patch-dsh-opencode-go-muse.mjs && node tests/manage-dsh-runtime.mjs",
     "test:privacy": "bun scripts/privacy-scan.mjs",
-    "test:source": "bun tests/smoke.mjs && bun tests/provider-error.mjs && bun tests/logging-privacy.mjs && bun tests/security-regressions.mjs && bun tests/agy.mjs",
+    "test:source": "bun tests/smoke.mjs && bun tests/provider-error.mjs && bun tests/logging-privacy.mjs && bun tests/security-regressions.mjs && bun tests/agy.mjs && bun tests/lifecycle.mjs",
     "test:lib": "bun tests/lib-check.mjs && node tests/apply-wiring.mjs && node tests/reasoning-wire.mjs",
     "test": "bun run build && bun run test:clean && bun run test:privacy",
     "test:all": "bun run test && bun run test:source && bun run test:lib",

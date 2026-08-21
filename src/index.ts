@@ -139,6 +139,7 @@ interface ChannelState {
   channelCtx: ChannelContext
   settingsScope?: { get(): ChannelConfig; update(patch: ChannelConfig): Promise<void> }
   discovered?: { models: AdapterModel[]; at: number }
+  generation: number
   /** 模型发现/登录状态变化后刷新注册（announce：让 UI 重新拉取列表）。 */
   replaceRegistration?: () => void
   /** 按登录状态注册/撤销 provider + adapter（false = 从模型列表移除）。 */
@@ -163,6 +164,7 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
       def,
       runtime: undefined as unknown as ChannelRuntime,
       channelCtx: undefined as unknown as ChannelContext,
+      generation: 0,
     }
     states.set(def.id, st)
 
@@ -185,8 +187,28 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
       if (c) await c.set(ref, JSON.stringify(token))
     }
     const clearToken = async (): Promise<void> => {
+      const clearGen = ++st.generation
       const c = credentials()
-      if (c) await c.unset(ref)
+      if (c) {
+        try {
+          await c.unset(ref)
+        } catch (error) {
+          logLine(`令牌清除失败: ${formatProviderErrorForLog(error)}`)
+        }
+      }
+      if (st.generation !== clearGen) return
+      st.syncRegistration?.(false)
+      st.discovered = undefined
+      if (st.settingsScope !== undefined) {
+        const scope = st.settingsScope
+        if (st.generation !== clearGen) return
+        try {
+          await scope.update({ discoveredModels: [] })
+        } catch (error) {
+          logLine(`模型列表持久化清除失败: ${formatProviderErrorForLog(error)}`)
+        }
+        if (st.generation !== clearGen) return
+      }
     }
     const getRaw = (): ChannelConfig => {
       const s = st.settingsScope
@@ -215,7 +237,48 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
       writeToken,
       clearToken,
       afterLogin: () => {
-        void discoverAndStore(st)
+        const loginGen = ++st.generation
+        st.discovered = undefined
+        const scope = st.settingsScope
+        void (async () => {
+          if (scope !== undefined) {
+            if (st.generation !== loginGen) return
+            try {
+              await scope.update({ discoveredModels: [] })
+            } catch (error) {
+              logLine(`模型列表持久化清除失败: ${formatProviderErrorForLog(error)}`)
+            }
+            if (st.generation !== loginGen) return
+          }
+          try {
+            await discoverAndStore(st)
+          } catch (error) {
+            logLine(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+          }
+        })().catch((error) => {
+          logLine(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+        })
+      },
+      notifyTokenCleared: () => {
+        const clearedGen = ++st.generation
+        st.syncRegistration?.(false)
+        st.discovered = undefined
+        if (st.settingsScope !== undefined) {
+          const scope = st.settingsScope
+          const gen = clearedGen
+          if (st.generation !== gen) return
+          void (async () => {
+            if (st.generation !== gen) return
+            try {
+              await scope.update({ discoveredModels: [] })
+            } catch (error) {
+              logLine(`模型列表持久化清除失败: ${formatProviderErrorForLog(error)}`)
+            }
+            if (st.generation !== gen) return
+          })().catch((error) => {
+            logLine(`模型列表持久化清除失败: ${formatProviderErrorForLog(error)}`)
+          })
+        }
       },
     }
     st.channelCtx = channelCtx
@@ -224,24 +287,49 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
 
   // ---------- 官方模型列表发现（通用：拉取 → 缓存 → 持久化 → 通知） ----------
   async function discoverAndStore(st: ChannelState): Promise<void> {
-    const state = await st.runtime.authStatus()
+    const startGen = st.generation
+    let state: Awaited<ReturnType<ChannelRuntime['authStatus']>>
+    try {
+      state = await st.runtime.authStatus()
+    } catch (error) {
+      logLine(`登录状态检查失败: ${formatProviderErrorForLog(error)}`)
+      return
+    }
+    if (st.generation !== startGen) return
     if (state.status !== 'logged-in') return
-    const found = await st.runtime.discoverModels()
+    let found: AdapterModel[] = []
+    try {
+      found = await st.runtime.discoverModels()
+    } catch (error) {
+      logLine(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+      return
+    }
+    if (st.generation !== startGen) return
     if (found.length > 0) {
-      st.discovered = { models: found, at: Date.now() }
+      if (st.generation !== startGen) return
       if (st.settingsScope !== undefined) {
         try {
           await st.settingsScope.update({ discoveredModels: found })
         } catch (error) {
           logLine(`模型列表持久化失败: ${formatProviderErrorForLog(error)}`)
         }
+        if (st.generation !== startGen) return
+      } else {
+        if (st.generation !== startGen) return
       }
-      st.channelCtx.notifyModelsChanged()
+      if (st.generation !== startGen) return
+      st.discovered = { models: found, at: Date.now() }
+      try {
+        st.channelCtx.notifyModelsChanged()
+      } catch (error) {
+        logLine(`模型列表刷新通知失败: ${formatProviderErrorForLog(error)}`)
+      }
       logLine(`[${st.def.id}] 已发现 ${found.length} 个订阅模型：${found.map((m) => m.id).join(', ')}`)
     }
   }
 
   async function logoutChannel(st: ChannelState): Promise<void> {
+    st.generation++
     await st.runtime.logout()
     st.discovered = undefined
     // 注销后从模型列表移除该提供商（未登录不再占用模型选择器）。
@@ -282,11 +370,22 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
         if (st === undefined) continue
         void (async () => {
           if (gateStopped.get(id) === true) return
-          const state = await st.runtime.authStatus()
-          if (gateStopped.get(id) === true || state.status !== 'logged-in') return
+          const startGen = st.generation
+          let state: Awaited<ReturnType<ChannelRuntime['authStatus']>>
+          try {
+            state = await st.runtime.authStatus()
+          } catch (error) {
+            logLine(`登录状态检查失败: ${formatProviderErrorForLog(error)}`)
+            return
+          }
+          if (gateStopped.get(id) === true || st.generation !== startGen || state.status !== 'logged-in') return
           st.syncRegistration?.(true)
-          if (st.discovered === undefined) void discoverAndStore(st)
-        })()
+          if (st.discovered === undefined) void discoverAndStore(st).catch((error) => {
+            logLine(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+          })
+        })().catch((error) => {
+          logLine(`设置同步失败: ${formatProviderErrorForLog(error)}`)
+        })
       }
       return () => {
         for (const { id } of created) {
@@ -336,16 +435,28 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
         setTimeout(() => { void gate() }, 300).unref()
         return
       }
-      const token = await st.channelCtx.readToken()
       if (gateStopped.get(def.id) === true) return
-      const state = await st.runtime.authStatus()
-      const loggedIn = token !== undefined || state.status === 'logged-in'
+      const startGen = st.generation
+      let state: Awaited<ReturnType<ChannelRuntime['authStatus']>>
+      try {
+        state = await st.runtime.authStatus()
+      } catch (error) {
+        logLine(`登录状态检查失败: ${formatProviderErrorForLog(error)}`)
+        return
+      }
+      if (gateStopped.get(def.id) === true || st.generation !== startGen) return
+      // Trust refresh-aware auth status; expired/revoked tokens must not remain visible via stored token alone.
+      const loggedIn = state.status === 'logged-in'
       sync(loggedIn, false)
       logLine(`[${def.id}] 登录状态: ${loggedIn ? '已登录，注册 provider' : '未登录，不注册 provider'}`)
       // 已登录但内存没有发现结果（如升级后存量会话）：顺手触发一次发现。
-      if (loggedIn) void discoverAndStore(st)
+      if (loggedIn) void discoverAndStore(st).catch((error) => {
+        logLine(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+      })
     }
-    void gate()
+    void gate().catch((error) => {
+      logLine(`启动门控失败: ${formatProviderErrorForLog(error)}`)
+    })
   }
 
   // ---------- 插件停止时中止所有进行中的登录会话与启动门控轮询 ----------

@@ -5,13 +5,15 @@
  * @module dsh-subscription-auth/channels/grok
  */
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { ChatGptAdapter } from '../adapter.js'
+import { ChatGptAdapter, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from '../adapter.js'
 import type { AdapterModel } from '../adapter.js'
 import { openBrowser } from '../oauth.js'
 import { pollDeviceFlow } from '../device-flow.js'
 import { formatProviderErrorForLog } from '../provider-error.js'
 import { formatFetchError } from '../proxy.js'
-import type { ChannelContext, ChannelDefinition, ChannelReasoning, ChannelRuntime } from '../channel.js'
+import type { ChannelContext, ChannelDefinition, ChannelReasoning, ChannelRuntime, StoredToken } from '../channel.js'
+import { TokenCoordinator, parseOAuthErrorBody } from '../token-coordinator.js'
+import type { DevicePollResult } from '../device-flow.js'
 
 const CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
 const SCOPE = 'openid profile email offline_access grok-cli:access api:access'
@@ -98,7 +100,7 @@ function toStoredToken(json: any, fallbackRefresh: string | undefined = undefine
 async function exchangeDeviceCode(
   tokenEndpoint: string,
   deviceCode: string,
-): Promise<{ status: 'complete' | 'pending' | 'slow_down' | 'failed'; message?: string; value?: any }> {
+): Promise<DevicePollResult<any>> {
   const res = await fetch(tokenEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -171,7 +173,11 @@ async function refreshToken(refresh: string): Promise<{ refresh: string; access:
       refresh_token: refresh,
     }).toString(),
   })
-  if (!res.ok) throw new Error(`令牌续期失败 (HTTP ${res.status})`)
+  if (!res.ok) {
+    let body: unknown
+    try { body = await res.json() } catch { body = undefined }
+    throw parseOAuthErrorBody(body, res.status, 'grok')
+  }
   return toStoredToken(await res.json(), refresh)
 }
 
@@ -213,6 +219,16 @@ export const grokChannel: ChannelDefinition = {
     let controller: AbortController | undefined
     let pending: { url: string; userCode: string } | undefined
 
+    const coordinator = new TokenCoordinator({
+      displayName: 'Grok (订阅)',
+      preemptMs: 60_000,
+      readToken: () => ctx.readToken(),
+      writeToken: (t) => ctx.writeToken(t),
+      clearToken: () => ctx.clearToken(),
+      refresh: (ref) => refreshToken(ref),
+      onCleared: () => ctx.notifyTokenCleared?.(),
+    })
+
     const adapter = new ChatGptAdapter({
       options: () => ({
         apiBaseURL: ctx.options().apiBaseURL,
@@ -221,20 +237,13 @@ export const grokChannel: ChannelDefinition = {
         defaultContextWindow: ctx.options().defaultContextWindow,
       }),
       reasoning: REASONING,
-      resolveAccessToken: async () => {
-        const token = await ctx.readToken()
-        if (!token) {
-          throw new LlmError('grok: 未登录。请在 设置 → 订阅服务 里完成订阅账号授权。', 'MISSING_CREDENTIAL')
-        }
-        if (token.expires - Date.now() < 60_000) {
-          const refreshed = await refreshToken(token.refresh)
-          await ctx.writeToken({ ...token, ...refreshed })
-          return { access: refreshed.access }
-        }
+      resolveAccessToken: async (force?: boolean, rejectedAccessToken?: string) => {
+        const token = await coordinator.getToken(force ?? false, rejectedAccessToken)
         return { access: token.access }
       },
       label: 'grok',
       displayName: 'Grok (订阅)',
+      streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     })
 
     return {
@@ -261,12 +270,12 @@ export const grokChannel: ChannelDefinition = {
             .then(async (body) => {
               const base = toStoredToken(body)
               const user = await fetchUserinfo(base.access)
-              const stored = {
+              const stored: StoredToken = {
                 ...base,
                 ...(user.accountId !== undefined ? { accountId: user.accountId } : {}),
                 ...(user.email !== undefined ? { email: user.email } : {}),
               }
-              await ctx.writeToken(stored)
+              await coordinator.replaceToken(stored)
               ctx.log('登录成功，开始发现模型列表…')
               ctx.afterLogin()
             })
@@ -290,19 +299,33 @@ export const grokChannel: ChannelDefinition = {
       },
 
       async authStatus() {
-        const token = await ctx.readToken()
-        if (token) {
-          return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
-        }
         if (pending && controller && !controller.signal.aborted) {
           return { provider: ctx.id, status: 'pending', url: pending.url, userCode: pending.userCode }
         }
-        return { provider: ctx.id, status: 'not-logged-in' }
+        const token = await ctx.readToken()
+        if (!token) {
+          return { provider: ctx.id, status: 'not-logged-in' }
+        }
+        if (token.expires - Date.now() > 60_000) {
+          return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
+        }
+        try {
+          const fresh = await coordinator.getToken(false)
+          return { provider: ctx.id, status: 'logged-in', account: fresh.accountId, expiresAt: fresh.expires }
+        } catch (error) {
+          if (error instanceof LlmError && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) {
+            return { provider: ctx.id, status: 'not-logged-in' }
+          }
+          if (token.expires > Date.now()) {
+            return { provider: ctx.id, status: 'logged-in', account: token.accountId, expiresAt: token.expires }
+          }
+          return { provider: ctx.id, status: 'not-logged-in' }
+        }
       },
 
       async logout() {
         this.cancelLogin()
-        await ctx.clearToken()
+        await coordinator.logout()
       },
 
       cancelLogin() {
@@ -312,12 +335,27 @@ export const grokChannel: ChannelDefinition = {
       },
 
       async discoverModels() {
-        const token = await ctx.readToken()
-        if (!token || token.expires - Date.now() < 60_000) return []
+        let token: { access: string; expires: number } | undefined
         try {
-          return await fetchGrokModels(token.access)
+          token = await coordinator.getToken(false)
+        } catch (error) {
+          if (error instanceof LlmError && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) {
+            return []
+          }
+          const stored = await ctx.readToken()
+          if (!stored || stored.expires <= Date.now()) return []
+          token = stored
+        }
+        if (!token) return []
+        const previous = ctx.getConfig().discoveredModels
+        try {
+          const models = await fetchGrokModels(token.access)
+          if (models.length > 0) return models
+          if (previous !== undefined && previous.length > 0) return previous
+          return []
         } catch (error: any) {
           ctx.log(`模型列表发现失败: ${formatProviderErrorForLog(error)}`)
+          if (previous !== undefined && previous.length > 0) return previous
           return []
         }
       },

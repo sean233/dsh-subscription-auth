@@ -23,7 +23,8 @@ Agy 是 Agy 所有的 CLI bridge，不是插件内嵌的模型渠道。插件不
   - `POST /subscription-auth/auth/login`，body 为 `{ "provider": "..." }`
   - `POST /subscription-auth/auth/logout`，body 为 `{ "provider": "..." }`
 - 只在渠道已登录时注册 provider 和 adapter；注销后从模型选择器撤销。
-- ChatGPT、Claude、Grok、Kimi 的令牌在请求前按过期时间静默续期。
+- ChatGPT 与 Grok 的令牌具备主动续期、单通道并发去重、401 时一次强制续期重试、持久失效（`invalid_grant` 等）自动清理与瞬时失败仅在未过期时回退。Claude、Kimi 的原有续期保持不变。
+- Responses 适配器（ChatGPT/Grok）在空闲超时（默认 300s，可注入覆盖）时安全中止流，避免长时间挂起。
 - 发现结果可持久化到 settings；手动 `models` 优先于持久化发现结果。
 - 发现只有 `id/name` 时会与内置目录合并。Grok `grok-4.6` 的目录 context window 为 `500000`，不会错误回退为渠道默认的 `1000000`。
 - Provider 错误统一提取嵌套 `message/code/type/details`，去除 `[object Object]` 并脱敏 Bearer、token、API key 等敏感值。
@@ -98,6 +99,22 @@ subscription-auth-agy:
 - Grok：`low`、`medium`、`high`，发送为 Responses `reasoning.effort`。
 - Kimi：`low`、`medium`、`high`，映射为 `thinking.budget_tokens`。
 - Agy：模型 ID 中若有档位，由 Agy 自己解释；插件不额外注入原生 reasoning 参数。
+
+## OpenCode Go 模型目录叠加（muse-spark-1.2-contributor）
+
+`opencode-go/muse-spark-1.2-contributor` 是上游 OpenCode Go 的官方模型目录叠加条目（`@earendil-works/pi-ai` 的 `opencode-go.json`），不是本插件的原生渠道。本插件的原生渠道仅 `agy` / `chatgpt` / `claude` / `grok` / `kimi` 五个；该叠加仅通过脚本注入到隔离的 dsh runtime，不代表插件内嵌或原生实现了 Gemini。
+
+默认使用稳定隔离路径，无需手写绝对路径：
+
+```sh
+node scripts/manage-dsh-runtime.mjs install --dsh-version 0.1.0-rc.8
+node scripts/manage-dsh-runtime.mjs check --dsh-version 0.1.0-rc.8
+```
+
+- 默认 runtime：`~/.local/share/dsh-subscription-auth/dsh-runtime`，稳定入口为 `<runtime>/node_modules/@deepseek-ai/dsh/lib/bin.js`（脚本会打印该 `entry`，供 launchd 使用）。
+- 备份位置：`~/.dsh/backups/dsh-model-catalog`（在 node_modules 之外，保存原始 `opencode-go.json` 的精确回读）。
+- 升级时使用显式版本重新执行 `install --dsh-version <exact-version>`（仅接受 `x.y.z` 或 `x.y.z-prerelease` 严格格式），再将打印的 `entry` 路径更新到 launchd 配置。
+- 不要直接编辑 `_npx` 缓存或 `node_modules/@earendil-works/pi-ai/dist/providers/data/opencode-go.json`，也不要在 `settings.yaml` 中对该 provider 强制单一 `protocol`；OpenCode Go 目录混合多种协议，单协议覆盖会破坏其他模型且重启后被覆盖。
 
 ## 隐私和安全
 

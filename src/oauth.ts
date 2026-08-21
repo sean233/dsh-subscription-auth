@@ -22,6 +22,7 @@ import { createServer } from 'node:http'
 import type { Server } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { parseOAuthErrorBody } from './token-coordinator.js'
 
 export const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const AUTH_BASE = 'https://auth.openai.com'
@@ -38,6 +39,8 @@ export interface StoredToken {
   /** epoch 毫秒。 */
   expires: number
   accountId?: string
+  email?: string
+  [key: string]: unknown
 }
 
 function base64url(buf: Buffer): string {
@@ -145,6 +148,12 @@ function toStoredToken(json: any, fallbackRefresh: string | undefined): StoredTo
   }
 }
 
+async function parseOAuthErrorBodyFromResponse(res: Response, label: string): Promise<ReturnType<typeof parseOAuthErrorBody>> {
+  let body: unknown
+  try { body = await res.json() } catch { body = undefined }
+  return parseOAuthErrorBody(body, res.status, label)
+}
+
 export async function exchangeCode(code: string, port: number, verifier: string): Promise<StoredToken> {
   const redirectUri = `http://localhost:${port}/auth/callback`
   const res = await fetch(`${AUTH_BASE}/oauth/token`, {
@@ -159,7 +168,7 @@ export async function exchangeCode(code: string, port: number, verifier: string)
     }).toString(),
   })
   if (!res.ok) {
-    throw new Error(`token exchange failed (HTTP ${res.status})`)
+    throw await parseOAuthErrorBodyFromResponse(res, 'chatgpt')
   }
   return toStoredToken(await res.json(), undefined)
 }
@@ -174,7 +183,7 @@ export async function refreshAccessToken(refresh: string): Promise<StoredToken> 
       client_id: CLIENT_ID,
     }).toString(),
   })
-  if (!res.ok) throw new Error(`token refresh failed (HTTP ${res.status})`)
+  if (!res.ok) throw await parseOAuthErrorBodyFromResponse(res, 'chatgpt')
   return toStoredToken(await res.json(), refresh)
 }
 
