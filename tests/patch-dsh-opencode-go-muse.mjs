@@ -10,8 +10,11 @@ import {
   DESIRED_KEY,
   DESIRED_GROUP,
   DESIRED_MODEL,
+  LEGACY_MODEL,
+  THINKING_LEVEL_MAP,
   deepEqual,
   isPlainObject,
+
   doCheck,
   doApply,
   getTargetPath,
@@ -118,6 +121,84 @@ function cli(args, opts = {}) {
 }
 
 // ---- Tests ----
+
+await runTest("DESIRED_MODEL has exact thinkingLevelMap", async () => {
+  const expected = { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null };
+  assertEqual(THINKING_LEVEL_MAP, expected, "THINKING_LEVEL_MAP must match spec");
+  assertEqual(DESIRED_MODEL.thinkingLevelMap, expected, "DESIRED_MODEL.thinkingLevelMap must match spec");
+  assert(!("thinkingLevelMap" in LEGACY_MODEL), "LEGACY_MODEL must not have thinkingLevelMap");
+  // DESIRED_MODEL should equal LEGACY_MODEL plus thinkingLevelMap
+  const { thinkingLevelMap, ...rest } = DESIRED_MODEL;
+  assertEqual(rest, LEGACY_MODEL, "DESIRED_MODEL without map must equal LEGACY_MODEL");
+});
+
+await runTest("legacy entry check reports outdated not conflict", async () => {
+  const root = createTempRoot();
+  try {
+    const { nmr, catalogPath } = makeFakeNodeModules(root, { catalog: { [DESIRED_GROUP]: { [DESIRED_KEY]: LEGACY_MODEL } } });
+    const before = fs.readFileSync(catalogPath, "utf8");
+    const result = await doCheck(nmr);
+    assert(result.ok === false && result.outdated === true, "legacy check should be outdated non-ok");
+    assert(result.legacy === true || result.reason === "outdated", "legacy flag");
+    const after = fs.readFileSync(catalogPath, "utf8");
+    assert(before === after, "legacy check must not mutate");
+    let res = cli(["--check", "--node-modules-root", nmr, "--json"]);
+    assert(res.status !== 0, "legacy CLI check should fail");
+    const out = JSON.parse(res.stdout.trim().split("\n").pop());
+    assert(out.ok === false && out.outdated === true, "legacy CLI json outdated");
+  } finally { cleanTempRoot(root); }
+});
+
+await runTest("legacy migration via apply with backup/readback/idempotency", async () => {
+  const root = createTempRoot();
+  try {
+    const rawLegacy = JSON.stringify({ [DESIRED_GROUP]: { [DESIRED_KEY]: LEGACY_MODEL } }, null, 2) + "\n";
+    const { nmr, catalogPath } = makeFakeNodeModules(root, { catalog: { [DESIRED_GROUP]: { [DESIRED_KEY]: LEGACY_MODEL } } });
+    const beforeRaw = fs.readFileSync(catalogPath, "utf8");
+    assert(beforeRaw === rawLegacy, "raw legacy mismatch");
+    const backupDir = path.join(root, "backup-legacy");
+    fs.mkdirSync(backupDir);
+    const result = await doApply(nmr, backupDir);
+    assert(result.ok && !result.idempotent, "legacy apply should migrate");
+    assert(result.backupFile, "backupFile present");
+    assert(fs.readFileSync(result.backupFile, "utf8") === rawLegacy, "backup exact readback");
+    const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
+    assertEqual(catalog[DESIRED_GROUP][DESIRED_KEY], DESIRED_MODEL, "migrated entry exact");
+    assertEqual(catalog[DESIRED_GROUP][DESIRED_KEY].thinkingLevelMap, THINKING_LEVEL_MAP, "migrated map exact");
+    // check now ok
+    const chk = await doCheck(nmr);
+    assert(chk.ok === true, "check after migration ok");
+    // idempotent second apply
+    const r2 = await doApply(nmr, backupDir);
+    assert(r2.idempotent === true && !r2.backupFile, "second apply idempotent");
+    assert(fs.readdirSync(backupDir).length === 1, "no new backup on idempotent");
+  } finally { cleanTempRoot(root); }
+});
+
+await runTest("arbitrary conflict still rejected (legacy-like tamper)", async () => {
+  const root = createTempRoot();
+  try {
+    const tampered = { ...LEGACY_MODEL, name: "Tampered" };
+    const { nmr } = makeFakeNodeModules(root, { catalog: { [DESIRED_GROUP]: { [DESIRED_KEY]: tampered } } });
+    let threw = false;
+    try { await doCheck(nmr); } catch (e) { threw = true; assert(e.message.includes("conflicting")); }
+    assert(threw, "arbitrary tamper must still be conflicting");
+    const backupDir = path.join(root, "backup-arb");
+    fs.mkdirSync(backupDir);
+    threw = false;
+    try { await doApply(nmr, backupDir); } catch (e) { threw = true; }
+    assert(threw, "arbitrary tamper apply must reject");
+    // also thinkingLevelMap wrong value should be rejected
+    const root2 = createTempRoot();
+    try {
+      const badMap = { ...DESIRED_MODEL, thinkingLevelMap: { ...THINKING_LEVEL_MAP, low: "wrong" } };
+      const { nmr: nmr2 } = makeFakeNodeModules(root2, { catalog: { [DESIRED_GROUP]: { [DESIRED_KEY]: badMap } } });
+      let threw2 = false;
+      try { await doCheck(nmr2); } catch (e) { threw2 = true; }
+      assert(threw2, "bad thinkingLevelMap must be rejected");
+    } finally { cleanTempRoot(root2); }
+  } finally { cleanTempRoot(root); }
+});
 
 await runTest("check no mutation", async () => {
   const root = createTempRoot();

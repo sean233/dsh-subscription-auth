@@ -6,6 +6,30 @@ import crypto from "node:crypto";
 
 export const DESIRED_KEY = "muse-spark-1.2-contributor";
 export const DESIRED_GROUP = "openai-responses";
+export const THINKING_LEVEL_MAP = {
+  off: null,
+  minimal: null,
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: null,
+  max: null,
+};
+
+export const LEGACY_MODEL = {
+  id: "muse-spark-1.2-contributor",
+  name: "Muse Spark 1.2 Contributor",
+  api: "openai-responses",
+  provider: "opencode-go",
+  baseUrl: "https://opencode.ai/zen/go/v1",
+  reasoning: true,
+  input: ["text", "image"],
+  cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+  contextWindow: 1048576,
+  maxTokens: 131072,
+  compat: { sessionAffinityFormat: "openai-nosession" },
+};
+
 export const DESIRED_MODEL = {
   id: "muse-spark-1.2-contributor",
   name: "Muse Spark 1.2 Contributor",
@@ -18,6 +42,7 @@ export const DESIRED_MODEL = {
   contextWindow: 1048576,
   maxTokens: 131072,
   compat: { sessionAffinityFormat: "openai-nosession" },
+  thinkingLevelMap: { ...THINKING_LEVEL_MAP },
 };
 
 export function isPlainObject(v) {
@@ -161,6 +186,10 @@ export async function loadCatalog(targetPath) {
   return { catalog, raw };
 }
 
+export function isLegacyEntryExact(entry) {
+  return isPlainObject(entry) && deepEqual(entry, LEGACY_MODEL);
+}
+
 export function validateNoConflicts(catalog) {
   for (const [groupName, groupObj] of Object.entries(catalog)) {
     if (!isPlainObject(groupObj)) continue;
@@ -168,9 +197,14 @@ export function validateNoConflicts(catalog) {
       const keyMatches = key === DESIRED_KEY;
       const idMatches = isPlainObject(entry) && entry.id === DESIRED_KEY;
       if (!keyMatches && !idMatches) continue;
-      if (groupName !== DESIRED_GROUP || key !== DESIRED_KEY || !deepEqual(entry, DESIRED_MODEL)) {
-        throw new Error(`conflicting entry for ${DESIRED_KEY} at ${groupName}.${key} (fails closed)`);
+      if (deepEqual(entry, DESIRED_MODEL) || deepEqual(entry, LEGACY_MODEL)) {
+        if (groupName !== DESIRED_GROUP || key !== DESIRED_KEY) {
+          throw new Error(`conflicting entry for ${DESIRED_KEY} at ${groupName}.${key} (fails closed)`);
+        }
+        // legacy at correct location is permitted as outdated, not a conflict
+        continue;
       }
+      throw new Error(`conflicting entry for ${DESIRED_KEY} at ${groupName}.${key} (fails closed)`);
     }
   }
 }
@@ -268,11 +302,14 @@ export async function doCheck(nodeModulesRoot) {
   if (!entry) {
     return { ok: false, missing: true, reason: "missing" };
   }
-  if (!isDesiredEntryExact(entry)) {
-    // This would have been caught by validateNoConflicts, but keep
-    throw new Error(`conflicting entry for ${DESIRED_KEY} (metadata mismatch)`);
+  if (isDesiredEntryExact(entry)) {
+    return { ok: true, missing: false };
   }
-  return { ok: true, missing: false };
+  if (isLegacyEntryExact(entry)) {
+    return { ok: false, missing: false, outdated: true, legacy: true, reason: "outdated" };
+  }
+  // This would have been caught by validateNoConflicts, but keep
+  throw new Error(`conflicting entry for ${DESIRED_KEY} (metadata mismatch)`);
 }
 
 export async function doApply(nodeModulesRoot, backupDir) {
@@ -285,7 +322,7 @@ export async function doApply(nodeModulesRoot, backupDir) {
   if (entry && isDesiredEntryExact(entry)) {
     return { ok: true, idempotent: true };
   }
-  if (entry) {
+  if (entry && !isLegacyEntryExact(entry)) {
     // Should have failed in validateNoConflicts, but double-check
     throw new Error(`conflicting entry exists, cannot apply`);
   }
@@ -399,6 +436,10 @@ async function main() {
       } else if (result.missing) {
         if (jsonMode) console.log(JSON.stringify({ ok: false, mode: "check", missing: true }));
         else console.log("missing: entry not found");
+        process.exit(1);
+      } else if (result.outdated || result.legacy) {
+        if (jsonMode) console.log(JSON.stringify({ ok: false, mode: "check", outdated: true, legacy: true }));
+        else console.log("outdated: legacy entry requires migration");
         process.exit(1);
       } else {
         if (jsonMode) console.log(JSON.stringify({ ok: false, mode: "check" }));

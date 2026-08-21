@@ -111,6 +111,7 @@ node scripts/patch-dsh-opencode-go-muse.mjs --node-modules-root ~/.local/share/d
 - The helper is fail-closed: any conflicting entry (wrong group, mismatched `id`/metadata, or package identity mismatch) aborts with an error instead of overwriting. Symlinked targets or package paths are rejected.
 - Upgrades require rerunning `install --dsh-version <exact-version>` with a strict `x.y.z` or `x.y.z-prerelease` version (no `latest`, ranges, or shell metacharacters). Copy the newly printed `entry` into launchd.
 - Do not edit `_npx` or `node_modules` catalog files directly, and do not force a single provider-level `protocol` in `settings.yaml` for `opencode-go`; the catalog mixes protocols and a single-protocol override is not durable.
+- If `muse-spark-1.2-contributor` sends `reasoning.effort="none"` (shows as `off`/`minimal` in the selector), rerun the patch to migrate the legacy catalog entry: the helper adds `thinkingLevelMap { off:null, minimal:null, low:"low", medium:"medium", high:"high", xhigh:null, max:null }` (Grok-compatible mapping) and `--check` reports the legacy entry as `outdated` until migrated; arbitrary catalog conflicts remain fail-closed.
 
 ## The rc.6 helper refuses to patch
 
