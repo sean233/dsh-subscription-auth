@@ -35,6 +35,7 @@ import { grokChannel } from './channels/grok.js'
 import { kimiChannel } from './channels/kimi.js'
 import { formatProviderErrorForLog, redactSecrets } from './provider-error.js'
 import { installEnvProxyDispatcher } from './proxy.js'
+import { registerCodexBridgeRoutes } from './codex-bridge.js'
 
 type Context = CordisContext & { llm: LlmRuntime }
 
@@ -464,6 +465,25 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}): void 
     for (const def of CHANNELS) gateStopped.set(def.id, true)
     for (const st of states.values()) st.runtime.cancelLogin()
   }, 'subscription-auth.auth-cleanup')
+
+  // ---------- Codex Responses bridge (localhost 3080 only) ----------
+  ctx.inject(['webServer'], (webCtx) => {
+    const webServer = webCtx.webServer as { host: string; port: number; register(route: { kind: string; path: string; handler: (req: unknown, res: unknown) => unknown }): () => void }
+    const credentialsForBridge = (): CredentialProvider | undefined => {
+      const a = credentials()
+      if (a !== undefined) return a
+      try {
+        const b = (webCtx as unknown as { get(name: string): unknown }).get?.('credentials') as CredentialProvider | undefined
+        return b
+      } catch { return undefined }
+    }
+    registerCodexBridgeRoutes({
+      webServer,
+      effect: (factory, label) => webCtx.effect(factory, label),
+      credentials: credentialsForBridge,
+      log: logLine,
+    })
+  })
 
   // ---------- 配置中心页面用的 HTTP 路由 ----------
   ctx.inject(['webServer'], (webCtx) => {

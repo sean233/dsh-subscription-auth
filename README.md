@@ -116,15 +116,106 @@ node scripts/manage-dsh-runtime.mjs check --dsh-version 0.1.0-rc.8
 - 升级时使用显式版本重新执行 `install --dsh-version <exact-version>`（仅接受 `x.y.z` 或 `x.y.z-prerelease` 严格格式），再将打印的 `entry` 路径更新到 launchd 配置。
 - 不要直接编辑 `_npx` 缓存或 `node_modules/@earendil-works/pi-ai/dist/providers/data/opencode-go.json`，也不要在 `settings.yaml` 中对该 provider 强制单一 `protocol`；OpenCode Go 目录混合多种协议，单协议覆盖会破坏其他模型且重启后被覆盖。
 
+## Codex Responses 本地桥接（muse-spark-1.2-contributor）
+
+本插件在 DSH 进程内提供一条本地 Codex Responses 兼容桥接，用于让官方 Codex（`responses` wire_api）通过 DSH 调用 OpenCode Go 的 `muse-spark-1.2-contributor` 模型。它不是浏览器自动化，也不是独立常驻的外部 daemon：桥接由插件在 DSH 的 `webServer` 进程内注册 HTTP 路由，逐请求通过 DSH 的 credential service 解析 `OPENCODE_GO_API_KEY` 并代理到 `https://opencode.ai/zen/go/v1`，对 Codex 发来的请求做归一化后原样透传 SSE 响应。
+
+- 仅在 `127.0.0.1:3080` 注册，绝不在 `127.0.0.1:13081` 的 Tailscale 侧 DSH 实例注册。启动时若 `webServer.host:port` 不是 `127.0.0.1:3080` 或 credential service 不可用，则不注册任何路由。
+- 路由（严格精确匹配）：
+  - `GET /_codex/v1/models`
+  - `POST /_codex/v1/responses`
+  - `POST /_codex/v1/responses/compact`（本地 v1 compaction 合成——上游无原生 `/responses/compact`，见下文限制说明）
+- `POST /_codex/v1/responses/compact` 为本地 v1 合成：与 `/responses` 完全一致校验 loopback/method/body cap/model/credential，单次调用上游 `/responses` 且 `stream=false`、禁用 tools、无 `previous_response_id`、追加清晰分隔的摘要指令，从 `output_text` 或 `output` 消息内容提取助手文本，返回 `200` 且 `output` 中包含 `role=user` 的 `input_text` 摘要（尾部保留最近用户文本 ≤4000 字符，摘要 ≤10000 字符，总计 ≤12000 字符的严格输出上界）。不声称支持原生加密 compaction 或 v2 `compaction_trigger`。
+- 优先暴露 catalog 别名 `opencode-go-responses/muse-spark-1.2-contributor`（`GET /_codex/v1/models` 首位），同时保留 canonical `muse-spark-1.2-contributor` 以兼容旧配置；两者之外的任何前缀/ID 返回 `400 model_not_supported`。桥接在每次上游 `/responses` 调用前（含 `compact` 合成）将别名或 canonical 精确翻译为 canonical `muse-spark-1.2-contributor` 再透传；缺省 `model` 时默认 canonical。
+- `reasoning.effort` 归一化：`none`/`off`/`minimal` → `low`，`xhigh`/`max` → `high`，`low`/`medium`/`high` 保持不变，缺省为 `high`。已修复上游 `reasoning.effort="none"` 在本地被错误透传导致的选择器显示为 `off/minimal` 的问题。
+- `tools` 存在时强制 `tool_choice="auto"`（覆盖任何传入的 `tool_choice`）；无 `tools` 时删除 `tool_choice`/`toolChoice`。已修复无工具时仍透传 `tool_choice="required"` 导致的上游报错。
+- `prompt_cache_key` 语义：若请求 JSON 已自带 `prompt_cache_key`（即使为 `null` 或空字符串）则精确保留、绝不覆盖；仅当未自带且存在有效会话标识时，才由桥接无状态合成注入。合成仅依赖请求头中的有效 Codex UUID（优先级 `thread-id` > `session-id` > `session_id` > 递归解析 `x-codex-turn-metadata` JSON 且仅识别 `conversationId`/`conversation_id`/`sessionId`/`session_id`/`threadId`/`thread_id`），以固定版本化域 `codex-session-cache:v1` + NUL 分隔的 `modelId` 与 UUID 经 SHA-256 base64url 哈希生成，上游 key 不含原始 UUID、长度 `<64`，暴露的纯函数为 `deriveCodexSessionCacheKey(headers, modelId)`。缺失/畸形/非法头返回 `undefined` 且不注入；无关 UUID（如 `turn_id`/`client` 伴随的 decoy）在 metadata 中被忽略，仅 `thread_id` 等已识别键下的 UUID 才生效。无服务端会话表，不合成 `previous_response_id`，不记录头/UUID/key/body/密钥。`POST /_codex/v1/responses` 与 `POST /_codex/v1/responses/compact` 均一致生效；上游 `usage.input_tokens_details.cached_tokens` 等缓存统计在 SSE 中字节级透传。
+- Stateless 会话复用说明：同一 `thread-id`/`session` 的多次请求映射到同一稳定 `prompt_cache_key`，从而在无状态前提下复用上游 prompt cache；不同 thread 或不同 `modelId` 域隔离为不同 key；显式 `prompt_cache_key` 始终优先。
+- 密钥解析：每次请求实时调用 `credentialRef("OPENCODE_GO_API_KEY")` 的 `resolve`，未配置返回 `401 missing_api_key`；Codex 配置或仓库中不存放任何上游 key。
+- 协作边界（fail-closed）：`input` 中若出现 `type: agent_message`（Codex 内部类型，含 `input_text` envelope + `encrypted_content`）或任何嵌套 `type: encrypted_content`，桥接在 `/responses` 与 `/responses/compact` 均直接返回 `400 { code: collaboration_transport_unsupported }`，不解密、不转发 ChatGPT 凭据、不静默剥离密文、不调用上游；指引调用方使用 Router 生成的 `router_opencode_go_responses_muse_spark_1_2_contributor`（Router 拥有加密中继）。DSH 桥接仅支持主会话/直接 Responses 与缓存。
+
+### Codex 配置（精确）
+
+Codex 通过自定义 provider 指向本地桥接，无需在 Codex 侧配置 `api_key`：
+
+```toml
+# ~/.codex/config.toml
+[model_providers."dsh-opencode-go"]
+name = "DSH OpenCode Go"
+base_url = "http://127.0.0.1:3080/_codex/v1"
+wire_api = "responses"
+# api_key 留空或不填；由 DSH credential service 逐请求提供
+```
+
+#### DSH 桥接边界与协作分流（重要）
+
+- DSH 桥接 **仅支持** Codex 主会话/直接 `Responses` 与 `prompt_cache_key` 缓存。**不支持** Codex 原生协作的加密子代理/跟进负载。
+- 任何 `/responses` 或 `/responses/compact` 的 `input` 中出现 `type: agent_message`（Codex 内部类型，内含 `input_text` envelope + `encrypted_content`）或任何嵌套内容片段 `type: encrypted_content` 时，桥接将 **fail-closed** 返回 `400 { code: collaboration_transport_unsupported }`，**不解密、不复制 Router 中继代码、不转发 ChatGPT 凭据、不静默剥离密文、不调用上游**。错误消息会指引调用方使用 Router 生成的 agent。
+- 原生 Muse 子代理/跟进（subagent/follow-up）**必须**使用 Codex Router 生成的 `router_opencode_go_responses_muse_spark_1_2_contributor`，因为加密协作负载需要 Router 的已认证原生中继；`dsh-opencode-go` 自定义 provider **故意不**持有 ChatGPT 凭据链。不要将 `dsh_muse_coder` 用作原生协作 agent——它仅为历史示例，协作场景下不具备加密中继能力。
+
+DSH 桥接用于单主会话直接调用的示例（顶层字段，非 `[agents.muse_coder]`，仅限非协作主会话）：
+
+```toml
+# ~/.codex/agents/dsh-muse-coder.toml  — 仅用于主会话直接调用，不适用于原生协作/子代理
+name = "dsh_muse_coder"
+description = "Bounded coding agent for DSH workspace tasks (main session only, no encrypted collaboration)"
+model_provider = "dsh-opencode-go"
+model = "opencode-go-responses/muse-spark-1.2-contributor"
+# 上游仍为 muse-spark-1.2-contributor；桥接在 /responses 前精确翻译（仅接受 canonical 与该精确别名）
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+You are a bounded coding agent. Keep changes minimal and within the workspace. Prefer tests and verify before concluding.
+"""
+```
+
+原生协作请改用 Router agent（由 `codex-router` 生成，拥有加密中继）：
+
+```toml
+# 由 Codex Router 生成，无需手写；示例仅示意其归属
+# agent: router_opencode_go_responses_muse_spark_1_2_contributor
+# model_provider 指向 Router 的已认证中继，而非 dsh-opencode-go
+```
+
+> 注意：`~/.codex/config.toml` 中的 `[agents]` 仅为全局 agent 设置，并非命名 agent 定义；自定义 agent 须为 `~/.codex/agents/` 下的独立文件并使用顶层字段。`~/.codex/config.toml` 仅保留 `[model_providers."dsh-opencode-go"]`。
+
+> Codex App 修改 `model_providers` / `agents` / `catalog` 后必须完全重启才能重载配置；仅重载窗口或热重载不会生效。
+
+### 密钥轮换命令 `dsh-opencode-key`
+
+本地安装/链接（在仓库根目录执行一次）：
+
+```sh
+bun link
+# 将会在本地包管理器 bin 中创建 dsh-opencode-key（指向 scripts/rotate-opencode-go-key.sh）
+# 该脚本会通过解析 BASH_SOURCE 的一层或多层 symlink 定位真实脚本目录，因此 bun link / npm link 等 bin 链接可用
+```
+
+使用：
+
+```sh
+dsh-opencode-key
+# 交互式隐藏输入：Enter new OpenCode Go API key: （不回显） + Confirm key: （不回显）
+# 校验：非空、无空白、以 sk- 开头且总长度与前缀后长度满足最小阈值
+# 仅更新已存在的本地存储：Pi (~/.pi/agent/auth.json 的 opencode-go)、OpenCode (~/.local/share/opencode/auth.json 的 opencode-go)、Codex secret (~/.codex/codex-router/opencode-go-api-key.secret)
+# 缺失的存储不创建，直接跳过；已存在的以原子写、0600 权限、fsync + 同目录重命名完成
+# 最后通过 DSH 的 credential RPC 调度：先 credentials.describe 校验 writable，再 credentials.set 写入；任一步失败则回滚已写的本地文件
+```
+
+安全特性：脚本全程 `set +x` 关闭 xtrace，密钥仅通过 stdin 管道传给 helper（不出现在 argv/env）；helper 在失败时清理临时文件并在写入前拒绝 symlink 链；权限始终 `0600`。
+
 ## 隐私和安全
 
 插件只通过 dsh credential service 读取本插件定义的渠道令牌，不记录令牌、账号或本机绝对路径。日志只输出有限的状态信息；provider 错误会先做敏感信息脱敏。Agy 的 stdout 只接受最终 `result.structured_output`，stderr 只排空不回传。
+
+Codex 桥接的额外边界：仅接受 loopback 来源（`127.0.0.1` / `::1` / `::ffff:127.0.0.1`），请求体上限 10 MiB，不记录请求/响应体，不向下游透传 `authorization`/`cookie` 等敏感头，同一用户的本地进程方可通过 loopback 访问。请勿将桥接端口对外绑定或通过代理暴露。
 
 请阅读：
 
 - [docs/SECURITY-PRIVACY.md](docs/SECURITY-PRIVACY.md)
 - [SECURITY.md](SECURITY.md)
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 
 ## 开发和测试
 

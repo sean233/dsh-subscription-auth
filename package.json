@@ -11,6 +11,9 @@
     "./client": { "types": "./lib/types/client.d.ts", "default": "./lib/client.js" },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "dsh-opencode-key": "./scripts/rotate-opencode-go-key.sh"
+  },
   "files": ["lib", "patches", "scripts", "cordis.patch.yml", "dsh.plugin.json", "README.md", "README.en.md", "LICENSE", "NOTICE.md", "CONTRIBUTING.md", "SECURITY.md", "docs", "examples"],
   "license": "BSD-3-Clause",
   "engines": { "dsh": ">=0.0.1" },
@@ -30,7 +33,7 @@
     "test:clean": "bun tests/clean-checkout.mjs && bun tests/patch-dsh-sandbox.mjs && node tests/patch-dsh-opencode-go-muse.mjs && node tests/manage-dsh-runtime.mjs",
     "test:privacy": "bun scripts/privacy-scan.mjs",
     "test:source": "bun tests/smoke.mjs && bun tests/provider-error.mjs && bun tests/logging-privacy.mjs && bun tests/security-regressions.mjs && bun tests/agy.mjs && bun tests/lifecycle.mjs",
-    "test:lib": "bun tests/lib-check.mjs && node tests/apply-wiring.mjs && node tests/reasoning-wire.mjs",
+    "test:lib": "bun tests/lib-check.mjs && node tests/apply-wiring.mjs && node tests/reasoning-wire.mjs && node tests/codex-bridge.mjs && node tests/codex-compact.mjs && node tests/codex-alias.mjs && bun tests/codex-collaboration-transport.mjs && node tests/rotate-key.mjs && bun tests/codex-session-cache.mjs",
     "test": "bun run build && bun run test:clean && bun run test:privacy",
     "test:all": "bun run test && bun run test:source && bun run test:lib",
     "ci": "bun run test"
